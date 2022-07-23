@@ -13,64 +13,98 @@ local DIVISION_OPTS = {
 
 local N_RHYTHMS = 4
 local N_LFOS = 4
+local N_MULTS = 4
+local N_SEQS = 4
 
-function number:get()
-    if self.modulation == nil then
-        return self.value
+
+function monkeypatch()
+    tk_global_raw = false -- global
+    
+    local core_write = params.write
+    
+    function params:write(filename, name)
+        local old_global_raw = tk_global_raw
+        tk_global_raw = true
+        core_write(self, filename, name)
+        tk_global_raw = old_global_raw
     end
-    local val = self.value
-    for _, v in pairs(self.modulation) do
-        val = val + (v*self.range)
+
+    function number:get(raw)
+        if self.modulation == nil or raw == true or tk_global_raw then
+            return self.value
+        end
+        local val = self.value
+        for _, v in pairs(self.modulation) do
+            val = val + (v*self.range)
+        end
+        val = util.round(val, 1)
+        if self.wrap then
+            val = util.wrap(val, self.min, self.max)
+        else
+            val = util.clamp(val, self.min, self.max)
+        end
+        return val
     end
-    val = util.round(val, 1)
-    if self.wrap then
-        val = util.wrap(val, self.min, self.max)
+
+    function number:bang()
+        self.action(self:get())
+    end
+    
+    function number:delta(d)
+        self:set(self:get(true) + d)
+    end
+
+    function taper:get_modulated_raw()
+        if self.modulation == nil then
+            return self.value
     else
-        val = util.clamp(val, self.min, self.max)
+        local val = self.value
+        for _, v in pairs(self.modulation) do
+            val = val + v
+        end
+        if controlspec.wrap then
+            val = val % 1
+        else
+            val = util.clamp(val, 0, 1)
+        end
+        return val
     end
-    return val
-end
+    end
 
-function taper:get_modulated_raw()
-  if self.modulation == nil then
-    return self.value
-  else
-    local val = self.value
-    for _, v in pairs(self.modulation) do
-      val = val + v
+    function taper:get(raw)
+        if raw == true then
+            return self:map_value(self.value)
+        end
+        return self:map_value(self:get_modulated_raw())
     end
-    if controlspec.wrap then
-      val = val % 1
-    else
-      val = util.clamp(val, 0, 1)
-    end
-    return val
-  end
-end
 
-function taper:get()
-  return self:map_value(self:get_modulated_raw())
-end
-
-function control:get_modulated_raw()
-  if self.modulation == nil then
-    return self.raw
-  else
-    local val = self.raw
-    for _, v in pairs(self.modulation) do
-      val = val + v
+    function control:get_modulated_raw()
+        if self.modulation == nil then
+            return self.raw
+        else
+            local val = self.raw
+            for _, v in pairs(self.modulation) do
+                val = val + v
+            end
+            if controlspec.wrap then
+                val = val % 1
+            else
+                val = util.clamp(val, 0, 1)
+            end
+            return val
+        end
     end
-    if controlspec.wrap then
-      val = val % 1
-    else
-      val = util.clamp(val, 0, 1)
-    end
-    return val
-  end
-end
 
-function control:get()
-  return self:map_value(self:get_modulated_raw())
+    function control:get(raw)
+        if raw == true then
+            return self:map_value(self.raw)
+        end
+        return self:map_value(self:get_modulated_raw())
+    end
+end -- monkeypatch
+
+function params:get_raw(p)
+    return self:lookup_param(p):get(true)
 end
 
 local state
@@ -81,27 +115,158 @@ end
 
 local bang_all = function()
     if state ~= nil then
-        for v, _ in pairs(state.bangable) do
-            params:lookup_param(v):bang()
+        for _, tier in ipairs(state.bangable) do
+            for v, _ in pairs(tier) do
+                params:lookup_param(v):bang()
+                tier[v] = nil
+            end
+            -- second round to pick up things we missed the first
+            for v, _ in pairs(tier) do
+                params:lookup_param(v):bang()
+                tier[v] = nil
+            end
+            if next(tier) ~= nil then
+                print("Missing modulation; too much recursion")
+            end
         end
-        state.bangable = {}
+        state.bangable = {{}, {}, {}, {}}
+        state.bang_deferred = nil
     end
 end
 
-local defer_bang = function(param)
-    if next(state.bangable) == nil then
+local defer_bang = function(param, tier)
+    if tier == nil then tier = 3 end
+    if state.bang_deferred == nil then
         clock.run(function()
             clock.sleep(0)
             bang_all()
         end)
     end
-    state.bangable[param] = true
+    state.bang_deferred = true
+    state.bangable[tier][param] = true
+end
+
+local make_seq = function(i, target_ids)
+    params:add_group("sequence "..i, 9 + 16)
+    params:add_number(n(i, "pos"), "position", 1, 16, 1, nil, true)
+    params:add_binary(n(i, "seq_active"), "active", "toggle", 1)
+    params:add_number(n(i, "seq_length"), "length", 1, 16, 4)
+    params:add_control(n(i, "shred"), "shred", controlspec.new(0, 1, "lin", 0, 0))
+    params:add_control(n(i, "zero"), "zero", controlspec.new(0, 1, "lin", 0, 0))
+    params:add_trigger(n(i, "advance"), "advance")
+    params:add_trigger(n(i, "reset"), "reset")
+    params:add_control(n(i, "seq_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
+    params:add_option(n(i, "seq_target"), "target", target_ids, 1)
+    defer_bang(n(i, "seq_target"))
+    defer_bang(n(i, "seq_length"))
+    local target = nil
+    local bang = function(p)
+        -- print("bang", target)
+        if target == nil then return end
+        if params:get(n(i, "seq_active")) > 0 then
+            local val = params:get(n(i, "seq_depth")) * params:get(n(i, "val_"..params:get(n(i, "pos"))))
+            -- print("setting mod for ", target.id, val)
+            target.modulation["seq_"..i] = val
+        else
+            -- print("setting nil for ", target.id)
+            target.modulation["seq_"..i] = nil
+        end
+        defer_bang(target.id)
+    end
+    params:set_action(n(i, "advance"), function() 
+        local pos = params:get_raw(n(i, "pos")) -- raw value
+        if math.random() < params:get(n(i, "shred")) then
+            -- randomize the old _modulated_ position
+            params:set(n(i, "val_"..params:get(n(i, "pos"))), math.random())
+        end
+        if math.random() < params:get(n(i, "zero")) then
+            -- zero the old _modulated_ position
+            params:set(n(i, "val_"..params:get(n(i, "pos"))), 0)
+        end
+        -- set the new _raw_ position
+        params:set(n(i, "pos"), util.wrap(pos + 1, 1, params:get(n(i, "seq_length"))))
+        bang()
+    end)
+    params:set_action(n(i, "reset"), function()
+        params:set(n(i, "pos"), 1)
+        bang()
+    end)
+    params:set_action(n(i, "seq_target"), function(t)
+        if target ~= nil and target.modulation ~= nil then
+            print("removing modulation for ", target.id)
+            target.modulation["seq_"..i] = nil
+            defer_bang(target.id)
+        end
+        if params:get(n(i, "seq_target")) == 1 then
+            target = nil
+        else
+            target = params:lookup_param(target_ids[params:get(n(i, "seq_target"))])
+            if target.modulation == nil then
+                target.modulation = {}
+            end
+        end
+        bang()
+    end)
+
+    for j=1,16,1 do
+        params:add_control(n(i, "val_"..j), "value "..j, controlspec.new(0, 1, "lin", 0, 0))
+    end
+    params:set_action(n(i, "pos"), bang)
+    params:set_action(n(i, "seq_active"), bang)
+    params:set_action(n(i, "seq_length"), function(l)
+        for j=1,16,1 do
+            if j <= l then
+                params:show(n(i, "val_"..j))
+            else
+                params:hide(n(i, "val_"..j))
+            end
+        end
+        params:set(n(i, "pos"), util.wrap(params:get(n(i, "pos")), 1, params:get(n(i, "seq_length"))))
+    end)
+end
+
+local make_mult = function(i, target_ids)
+    params:add_group("mult "..i, 10)
+    params:add_control(n(i, "value"), "value", controlspec.new(-1, 1, "lin", 0, 0))
+    params:add_binary(n(i, "mult_active"), "active", "toggle", 1)
+    local targets = {}
+    local bang = function()
+        for j=1,4,1 do
+            if targets[j] ~= nil then
+                if params:get(n(i, "mult_active")) > 0 then
+                    targets[j].modulation["mult_"..i] = params:get(n(i, "mult_depth_"..j))*params:get(n(i, "value"))
+                else
+                    targets[j].modulation["mult_"..i] = nil
+                end
+                defer_bang(targets[j].id)
+            end
+        end
+    end
+    params:set_action(n(i, "value"), bang)
+    defer_bang(n(i, "value"))
+    params:set_action(n(i, "mult_active"), bang)
+    for j=1,4,1 do
+        params:add_control(n(i, "mult_depth_"..j), "depth "..j, controlspec.new(-1, 1, "lin", 0, 0))
+        params:add_option(n(i, "mult_target_"..j), "target "..j, target_ids, 1)
+        params:set_action(n(i, "mult_target_"..j), function(t)
+            if targets[j] ~= nil and targets[j].modulation ~= nil then
+                targets[j].modulation["mult_"..i] = nil
+                defer_bang(targets[j].id)
+            end
+            if params:get(n(i, "mult_target_"..j)) == 1 then
+                targets[j] = nil
+            else
+                targets[j] = params:lookup_param(target_ids[params:get(n(i, "mult_target_"..j))])
+            end
+        end)
+        defer_bang(n(i, "mult_target_"..j))
+    end
 end
 
 local make_lfo = function(i, targets)
     params:add_group("lfo "..i, 8)
     params:add_binary(n(i, "clocked"), "clocked", "toggle", 0)
-    state.bangable[n(i, "clocked")] = true
+    defer_bang(n(i, "clocked"))
     params:add_option(n(i, "clocked_period"), "beats", DIVISION_OPTS, 7)
     params:add_control(n(i, "unclocked_period"), "seconds", controlspec.new(0.1, 300, "exp", 0, 1))
     params:set_action(n(i, "clocked"), function (c)
@@ -114,10 +279,9 @@ local make_lfo = function(i, targets)
         end
         _menu.rebuild_params()
     end)
-    params:add_control(n(i, "depth"), "depth", controlspec.new(0, 1, "lin", 0, 0))
     params:add_binary(n(i, "lfo_bipolar"), "bipolar", "toggle", 0)
     params:add_option(n(i, "shape"), "shape", {"sine", "tri/ramp", "pulse", "random"}, 1)
-    state.bangable[n(i, "shape")] = true
+    defer_bang(n(i, "shape"))
     params:set_action(n(i, "shape"), function (s)
         if s == 2 or s == 3 then
             params:show(n(i, "width"))
@@ -127,8 +291,9 @@ local make_lfo = function(i, targets)
         _menu.rebuild_params()
     end)
     params:add_control(n(i, "width"), "width", controlspec.new(0, 1, "lin", 0, 0.5))
+    params:add_control(n(i, "depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
     params:add_option(n(i, "lfo_target"), "target", targets, 1)
-    state.bangable[n(i, "lfo_target")] = true
+    defer_bang(n(i, "lfo_target"))
     local target = nil
     params:set_action(n(i, "lfo_target"), function(t)
         if target ~= nil and target.modulation ~= nil then
@@ -198,24 +363,24 @@ local make_rhythm = function(i, targets)
     params:set_action(n(i, "div"), function(d)
         state.rhythms[i]:set_division(DIVISIONS[d])
     end)
-    state.bangable[n(i, "div")] = true
+    defer_bang(n(i, "div"))
     params:add_control(n(i, "swing"), "swing", controlspec.new(50, 90, "lin", 0, 50))
     params:set_action(n(i, "swing"), function(d)
         state.rhythms[i]:set_swing(d)
     end)
-    state.bangable[n(i, "swing")] = true
-    params:add_number(n(i, "length"), "length", 1, 24, 8)
+    defer_bang(n(i, "swing"))
+    params:add_number(n(i, "rhythm_length"), "length", 1, 24, 8)
     params:add_control(n(i, "fill"), "fill", controlspec.new(0, 1, "lin", 0, 1))
     params:add_control(n(i, "offset"), "offset", controlspec.new(0, 1, "lin", 0, 0))
-    state.bangable[n(i, "length")] = true
+    defer_bang(n(i, "rhythm_length"))
     local trigs = {}
     local gen = function ()
-        local l = params:get(n(i, "length"))
+        local l = params:get(n(i, "rhythm_length"))
         local k = util.round(params:get(n(i, "fill"))*l, 1)
         local w = util.round(params:get(n(i, "offset"))*l, 1)
         trigs = er.gen(k, l, w)
     end
-    params:set_action(n(i, "length"), gen)
+    params:set_action(n(i, "rhythm_length"), gen)
     params:set_action(n(i, "fill"), gen)
     params:set_action(n(i, "offset"), gen)
     gen()
@@ -225,7 +390,7 @@ local make_rhythm = function(i, targets)
     local t = 1
     local tick = function ()
         if params:get(n(i, "active")) == 0 then
-            t = util.wrap(t + 1, 1, params:get(n(i, "length")))
+            t = util.wrap(t + 1, 1, params:get(n(i, "rhythm_length")))
             return
         end
         for _, v in ipairs(targets) do
@@ -235,16 +400,13 @@ local make_rhythm = function(i, targets)
                     if trigs[t] then p:set(1) else p:set(0) end
                 elseif p.t == params.tTRIGGER then
                     if trigs[t] then 
-                        if p.defer ~= nil then
-                            clock.run(function() p:bang() end)
-                        else
-                            p:bang() 
-                        end
+                        --params:lookup_param(p.id):bang()
+                        defer_bang(p.id)
                     end
                 end
             end
         end
-        t = util.wrap(t + 1, 1, params:get(n(i, "length")))
+        t = util.wrap(t + 1, 1, params:get(n(i, "rhythm_length")))
     end    
     state.rhythms[i] = state.lattice:new_pattern{
         enabled = true,
@@ -258,6 +420,10 @@ local get_binaries = function()
     ret = {}
     for i=1,N_RHYTHMS,1 do
         table.insert(ret, n(i, "active"))
+    end
+    for i=1,N_SEQS,1 do
+        table.insert(ret, n(i, "advance"))
+        table.insert(ret, n(i, "reset"))
     end
     for k,v in pairs(params.params) do
         if (v.t == params.tBINARY or v.t == params.tTRIGGER) and v.id ~= nil then
@@ -289,7 +455,7 @@ local pre_init = function()
         lattice = lattice:new(),
         rhythms = {},
         lfos = {},
-        bangable = {},
+        bangable = {{}, {}, {}, {}},
     }   
     print("pre init hook")
     init = function()
@@ -301,6 +467,12 @@ local pre_init = function()
         end
         for i=1,N_LFOS,1 do
             make_lfo(i, numbers)
+        end
+        for i=1,N_MULTS,1 do
+            make_mult(i, numbers)
+        end
+        for i=1,N_SEQS,1 do
+            make_seq(i, numbers)
         end
         -- after adding our params, we want to re-load default/existing values
         -- but, we don't want to re-bang script params, 
@@ -319,6 +491,7 @@ local post_cleanup = function()
     state = nil
 end
 print("registering pre init hook")
-mod.hook.register("script_pre_init", "test pre init", pre_init)
-mod.hook.register("script_post_cleanup", "test post clean", post_cleanup)
+mod.hook.register("system_post_startup", "toolkit post startup", monkeypatch)
+mod.hook.register("script_pre_init", "toolkit pre init", pre_init)
+mod.hook.register("script_post_cleanup", "toolkit post clean", post_cleanup)
 

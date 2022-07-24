@@ -16,21 +16,25 @@ local N_LFOS = 4
 local N_MULTS = 4
 local N_SEQS = 4
 
+local state = {
+    registered_numbers = {},
+    registered_booleans = {},
+}
 
 function monkeypatch()
-    tk_global_raw = false -- global
+    state.global_raw = false
     
     local core_write = params.write
     
     function params:write(filename, name)
-        local old_global_raw = tk_global_raw
-        tk_global_raw = true
+        local old_global_raw = state.global_raw
+        state.global_raw = true
         core_write(self, filename, name)
-        tk_global_raw = old_global_raw
+        state.global_raw = old_global_raw
     end
 
     function number:get(raw)
-        if self.modulation == nil or raw == true or tk_global_raw then
+        if self.modulation == nil or raw == true or state.global_raw then
             return self.value
         end
         local val = self.value
@@ -101,13 +105,12 @@ function monkeypatch()
         end
         return self:map_value(self:get_modulated_raw())
     end
+    state.monkeypatched = true
 end -- monkeypatch
 
 function params:get_raw(p)
     return self:lookup_param(p):get(true)
 end
-
-local state
 
 local n = function(i, s)
     return "tk_" .. i .. "_" ..s
@@ -360,10 +363,15 @@ end
 
 local make_rhythm = function(i, targets)
     params:add_group("rhythm " .. i, 6 + #targets)
-    params:add_binary(n(i, "active"), "active", "toggle", 1)
+    params:add_binary(n(i, "rhythm_active"), "active", "toggle", 1)
     params:add_option(n(i, "div"), "division", DIVISION_OPTS, 7)
     params:set_action(n(i, "div"), function(d)
         state.rhythms[i]:set_division(DIVISIONS[d])
+        -- This arcane machination is required to preserve appropriate swing and beats when changing divisions.
+        local tick_length = state.rhythms[i].division * state.lattice.ppqn * state.lattice.meter
+        local two_phase = (state.lattice.transport % (2*tick_length))/tick_length
+        state.rhythms[i].phase = state.lattice.transport % tick_length
+        state.rhythms[i].downbeat = (two_phase < 1)
     end)
     defer_bang(n(i, "div"))
     params:add_control(n(i, "swing"), "swing", controlspec.new(50, 90, "lin", 0, 50))
@@ -375,12 +383,12 @@ local make_rhythm = function(i, targets)
     params:add_control(n(i, "fill"), "fill", controlspec.new(0, 1, "lin", 0, 1))
     params:add_control(n(i, "offset"), "offset", controlspec.new(0, 1, "lin", 0, 0))
     defer_bang(n(i, "rhythm_length"))
-    local trigs = {}
+    state.trigs[i] = {}
     local gen = function ()
         local l = params:get(n(i, "rhythm_length"))
         local k = util.round(params:get(n(i, "fill"))*l, 1)
         local w = util.round(params:get(n(i, "offset"))*l, 1)
-        trigs = er.gen(k, l, w)
+        state.trigs[i] = er.gen(k, l, w)
     end
     params:set_action(n(i, "rhythm_length"), gen)
     params:set_action(n(i, "fill"), gen)
@@ -391,7 +399,7 @@ local make_rhythm = function(i, targets)
     end
     local t = 1
     local tick = function ()
-        if params:get(n(i, "active")) == 0 then
+        if params:get(n(i, "rhythm_active")) == 0 then
             t = util.wrap(t + 1, 1, params:get(n(i, "rhythm_length")))
             return
         end
@@ -399,9 +407,9 @@ local make_rhythm = function(i, targets)
             if params:get(n(i, "to_"..v)) > 0 then
                 local p = params:lookup_param(v)
                 if p.t == params.tBINARY then
-                    if trigs[t] then p:set(1) else p:set(0) end
+                    if state.trigs[i][t] then p:set(1) else p:set(0) end
                 elseif p.t == params.tTRIGGER then
-                    if trigs[t] then 
+                    if state.trigs[i][t] then 
                         --params:lookup_param(p.id):bang()
                         defer_bang(p.id)
                     end
@@ -419,14 +427,8 @@ local make_rhythm = function(i, targets)
 end
 
 local get_binaries = function() 
-    ret = {}
-    for i=1,N_RHYTHMS,1 do
-        table.insert(ret, n(i, "active"))
-    end
-    for i=1,N_SEQS,1 do
-        table.insert(ret, n(i, "advance"))
-        table.insert(ret, n(i, "reset"))
-    end
+    ret = {table.unpack(state.registered_booleans)}
+
     for k,v in pairs(params.params) do
         if (v.t == params.tBINARY or v.t == params.tTRIGGER) and v.id ~= nil then
             if v.id:find("tk_%d+_to_") == nil then
@@ -439,6 +441,9 @@ end
 
 local get_numericals = function()
     ret = {"none"}
+    for _, v in ipairs(state.registered_numbers) do
+        table.insert(ret, v)
+    end
     for k,v in pairs(params.params) do
         if (v.t == params.tCONTROL or v.t == params.tNUMBER or v.t == params.tTAPER) and v.id ~= nil then
             if v.id == "output_level" or v.id == "input_level" or v.id == "monitor_level" or v.id == "engine_level" or v.id == "softcut_level" or v.id == "tape_level" then
@@ -452,16 +457,26 @@ local get_numericals = function()
 end
 
 local pre_init = function()
+    print("pre-init")
     local init1 = init
-    state = {
-        lattice = lattice:new(),
-        rhythms = {},
-        lfos = {},
-        bangable = {{}, {}, {}, {}},
-    }   
-    print("pre init hook")
+    state.lattice = lattice:new()
+    state.rhythms = {}
+    state.lfos = {}
+    state.bangable = {{}, {}, {}, {}}
+    state.trigs = {}
+    -- cleaning up the registered numbers and booleans are handled in cleanup
+    
+    for i=1,N_RHYTHMS,1 do
+        table.insert(state.registered_booleans, n(i, "rhythm_active"))
+    end
+    for i=1,N_SEQS,1 do
+        table.insert(state.registered_booleans, n(i, "advance"))
+        table.insert(state.registered_booleans, n(i, "reset"))
+    end    
     init = function()
+        print("about to init")
         init1()
+        print("post init")
         local binaries = get_binaries()
         local numbers = get_numericals()
         for i=1,N_RHYTHMS,1 do
@@ -481,19 +496,20 @@ local pre_init = function()
         -- or bang our params which have conflicting side-effects
         params:read(nil, true)
         bang_all()
+        print("Starting")
         state.lattice:start()
     end
 end
 
 
 local post_cleanup = function()
-    if state ~= nil then
-        state.lattice:destroy()
-    end
-    state = nil
+    print("post cleanup")
+    state.lattice:destroy()
+    state.registered_numbers = {}
+    state.registered_booleans = {}
 end
-print("registering pre init hook")
 mod.hook.register("system_post_startup", "toolkit post startup", monkeypatch)
 mod.hook.register("script_pre_init", "toolkit pre init", pre_init)
 mod.hook.register("script_post_cleanup", "toolkit post clean", post_cleanup)
 
+return state

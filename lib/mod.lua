@@ -154,7 +154,9 @@ local make_seq = function(i, target_ids)
     params:add_control(n(i, "shred"), "shred", controlspec.new(0, 1, "lin", 0, 0))
     params:add_control(n(i, "zero"), "zero", controlspec.new(0, 1, "lin", 0, 0))
     params:add_trigger(n(i, "advance"), "advance")
+    params:lookup_param(n(i, "advance")).priority = 1
     params:add_trigger(n(i, "reset"), "reset")
+    params:lookup_param(n(i, "reset")).priority = 2
     params:add_control(n(i, "seq_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
     params:add_option(n(i, "seq_target"), "target", target_ids, 1)
     defer_bang(n(i, "seq_target"))
@@ -238,7 +240,7 @@ local make_mult = function(i, target_ids)
                 else
                     targets[j].modulation["mult_"..i] = nil
                 end
-                defer_bang(targets[j].id)
+                defer_bang(targets[j].id, targets[j].priority)
             end
         end
     end
@@ -251,7 +253,7 @@ local make_mult = function(i, target_ids)
         params:set_action(n(i, "mult_target_"..j), function(t)
             if targets[j] ~= nil and targets[j].modulation ~= nil then
                 targets[j].modulation["mult_"..i] = nil
-                defer_bang(targets[j].id)
+                defer_bang(targets[j].id, targets[j].priority)
             end
             if params:get(n(i, "mult_target_"..j)) == 1 then
                 targets[j] = nil
@@ -299,7 +301,7 @@ local make_lfo = function(i, targets)
         if target ~= nil and target.modulation ~= nil then
             print("removing modulation for ", target.id)
             target.modulation["lfo_"..i] = nil
-            defer_bang(target.id)
+            defer_bang(target.id, target.priority)
         end
         if params:get(n(i, "lfo_target")) == 1 then
             target = nil
@@ -347,7 +349,7 @@ local make_lfo = function(i, targets)
         last_phase = phase
         if target.modulation == nil then target.modulation = {} end
         target.modulation["lfo_"..i] = params:get(n(i, "depth")) * (value - 0.5*params:get(n(i, "lfo_bipolar")))
-        defer_bang(target.id)
+        defer_bang(target.id, target.priority)
     end
     state.lfos[i] = state.lattice:new_pattern{
         enabled = true,

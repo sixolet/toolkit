@@ -24,11 +24,13 @@ function init()
     params:set_action("pw", function(c) engine.pw(c) end)
     params:add_number("note", "note", 12, 127, 48)
     params:add_trigger("trig", "trig")
+    params:lookup_param("trig").priority = 4
     params:set_action("trig", function (t)
         engine.hz(music.note_num_to_freq(music.snap_note_to_array(params:get("note"), scale)))
     end)
     params:add_number("note 2", "note 2", 12, 127, 48)
     params:add_trigger("trig 2", "trig 2")
+    params:lookup_param("trig 2").priority = 4
     params:set_action("trig 2", function (t)
         engine.hz(music.note_num_to_freq(music.snap_note_to_array(params:get("note 2"), scale)))
     end)

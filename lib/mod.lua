@@ -18,7 +18,7 @@ local N_SEQS = 4
 
 local state = {
     registered_numbers = {},
-    registered_booleans = {},
+    registered_binaries = {},
 }
 
 function monkeypatch()
@@ -149,6 +149,23 @@ local defer_bang = function(param, tier)
     state.bangable[tier][param] = true
 end
 
+state.defer_bang = defer_bang
+
+local make_string_option_backup = function(id, options)
+    local str_id = (id .. "_str")
+    params:add_text(str_id)
+    params:set_action(str_id, function(s)
+        local k = tab.key(options, s)
+        if k ~= nil then
+            params:set(id, k, true)
+        end
+        params:lookup_param(id):bang()
+    end)
+    params:hide(str_id)
+    defer_bang(str_id)
+    return str_id
+end
+
 local make_seq = function(i, target_ids)
     params:add_group("sequence "..i, 9 + 16)
     params:add_number(n(i, "pos"), "position", 1, 16, 1, nil, true)
@@ -162,7 +179,7 @@ local make_seq = function(i, target_ids)
     params:lookup_param(n(i, "reset")).priority = 2
     params:add_control(n(i, "seq_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
     params:add_option(n(i, "seq_target"), "target", target_ids, 1)
-    defer_bang(n(i, "seq_target"))
+    local str_backup = make_string_option_backup(n(i, "seq_target"), target_ids)
     defer_bang(n(i, "seq_length"))
     local target = nil
     local bang = function(p)
@@ -197,6 +214,7 @@ local make_seq = function(i, target_ids)
         bang()
     end)
     params:set_action(n(i, "seq_target"), function(t)
+        local str_id = target_ids[params:get(n(i, "seq_target"))]
         if target ~= nil and target.modulation ~= nil then
             print("removing modulation for ", target.id)
             target.modulation["seq_"..i] = nil
@@ -204,8 +222,10 @@ local make_seq = function(i, target_ids)
         end
         if params:get(n(i, "seq_target")) == 1 then
             target = nil
+            params:set(str_backup, "", true)
         else
-            target = params:lookup_param(target_ids[params:get(n(i, "seq_target"))])
+            params:set(str_backup, str_id, true)
+            target = params:lookup_param(str_id)
             if target.modulation == nil then
                 target.modulation = {}
             end
@@ -231,7 +251,7 @@ local make_seq = function(i, target_ids)
 end
 
 local make_mult = function(i, target_ids)
-    params:add_group("mult "..i, 10)
+    params:add_group("mult "..i, 13)
     params:add_control(n(i, "value"), "value", controlspec.new(-1, 1, "lin", 0, 0))
     params:add_binary(n(i, "mult_active"), "active", "toggle", 1)
     local targets = {}
@@ -253,6 +273,8 @@ local make_mult = function(i, target_ids)
     for j=1,4,1 do
         params:add_control(n(i, "mult_depth_"..j), "depth "..j, controlspec.new(-1, 1, "lin", 0, 0))
         params:add_option(n(i, "mult_target_"..j), "target "..j, target_ids, 1)
+        local str_backup = make_string_option_backup(n(i, "mult_target_"..j), target_ids)
+
         params:set_action(n(i, "mult_target_"..j), function(t)
             if targets[j] ~= nil and targets[j].modulation ~= nil then
                 targets[j].modulation["mult_"..i] = nil
@@ -260,11 +282,12 @@ local make_mult = function(i, target_ids)
             end
             if params:get(n(i, "mult_target_"..j)) == 1 then
                 targets[j] = nil
+                params:set(str_backup, "", true)
             else
                 targets[j] = params:lookup_param(target_ids[params:get(n(i, "mult_target_"..j))])
+                params:set(str_backup, targets[j].id, true)
             end
         end)
-        defer_bang(n(i, "mult_target_"..j))
     end
 end
 
@@ -298,7 +321,8 @@ local make_lfo = function(i, targets)
     params:add_control(n(i, "width"), "width", controlspec.new(0, 1, "lin", 0, 0.5))
     params:add_control(n(i, "depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
     params:add_option(n(i, "lfo_target"), "target", targets, 1)
-    defer_bang(n(i, "lfo_target"))
+    local str_backup = make_string_option_backup(n(i, "lfo_target"), targets)
+
     local target = nil
     params:set_action(n(i, "lfo_target"), function(t)
         if target ~= nil and target.modulation ~= nil then
@@ -308,8 +332,10 @@ local make_lfo = function(i, targets)
         end
         if params:get(n(i, "lfo_target")) == 1 then
             target = nil
+            params:set(str_backup, "", true)
         else
             target = params:lookup_param(targets[params:get(n(i, "lfo_target"))])
+            params:set(str_backup, target.id, true)
         end
     end)
     local last_phase = 0
@@ -427,11 +453,11 @@ local make_rhythm = function(i, targets)
 end
 
 local get_binaries = function() 
-    ret = {table.unpack(state.registered_booleans)}
+    ret = {table.unpack(state.registered_binaries)}
 
     for k,v in pairs(params.params) do
         if (v.t == params.tBINARY or v.t == params.tTRIGGER) and v.id ~= nil then
-            if v.id:find("tk_%d+_to_") == nil then
+            if v.id:find("tk_%d+_to_") == nil and not tab.contains(state.registered_binaries, v.id) then
                 table.insert(ret, v.id)
             end
         end
@@ -446,10 +472,12 @@ local get_numericals = function()
     end
     for k,v in pairs(params.params) do
         if (v.t == params.tCONTROL or v.t == params.tNUMBER or v.t == params.tTAPER) and v.id ~= nil then
-            if v.id == "output_level" or v.id == "input_level" or v.id == "monitor_level" or v.id == "engine_level" or v.id == "softcut_level" or v.id == "tape_level" then
-                -- pass
-            else
-                table.insert(ret, v.id)
+            if not tab.contains(state.registered_numbers, v.id) then
+                if v.id == "output_level" or v.id == "input_level" or v.id == "monitor_level" or v.id == "engine_level" or v.id == "softcut_level" or v.id == "tape_level" then
+                    -- pass
+                else
+                    table.insert(ret, v.id)
+                end
             end
         end
     end
@@ -467,12 +495,20 @@ local pre_init = function()
     -- cleaning up the registered numbers and booleans are handled in cleanup
     
     for i=1,N_RHYTHMS,1 do
-        table.insert(state.registered_booleans, n(i, "rhythm_active"))
+        table.insert(state.registered_binaries, n(i, "rhythm_active"))
+        table.insert(state.registered_numbers, n(i, "fill"))
+        table.insert(state.registered_numbers, n(i, "offset"))
     end
     for i=1,N_SEQS,1 do
-        table.insert(state.registered_booleans, n(i, "advance"))
-        table.insert(state.registered_booleans, n(i, "reset"))
-    end    
+        table.insert(state.registered_binaries, n(i, "seq_active"))
+        table.insert(state.registered_binaries, n(i, "advance"))
+        table.insert(state.registered_binaries, n(i, "reset"))
+        table.insert(state.registered_numbers, n(i, "shred"))
+        table.insert(state.registered_numbers, n(i, "zero"))
+    end
+    for i=1,N_LFOS,1 do
+        table.insert(state.registered_binaries, n(i, "lfo_active"))
+    end
     init = function()
         print("about to init")
         init1()
@@ -506,7 +542,7 @@ local post_cleanup = function()
     print("post cleanup")
     state.lattice:destroy()
     state.registered_numbers = {}
-    state.registered_booleans = {}
+    state.registered_binaries = {}
 end
 mod.hook.register("system_post_startup", "toolkit post startup", monkeypatch)
 mod.hook.register("script_pre_init", "toolkit pre init", pre_init)

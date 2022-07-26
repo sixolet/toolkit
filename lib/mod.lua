@@ -99,8 +99,8 @@ function monkeypatch()
         end
     end
 
-    function control:get(raw)
-        if raw == true then
+    function control:get(unmodded)
+        if unmodded == true then
             return self:map_value(self.raw)
         end
         return self:map_value(self:get_modulated_raw())
@@ -108,7 +108,7 @@ function monkeypatch()
     state.monkeypatched = true
 end -- monkeypatch
 
-function params:get_raw(p)
+function params:get_unmodded(p)
     return self:lookup_param(p):get(true)
 end
 
@@ -118,21 +118,24 @@ end
 
 local bang_all = function()
     if state ~= nil then
-        for _, tier in ipairs(state.bangable) do
-            for v, _ in pairs(tier) do
-                params:lookup_param(v):bang()
-                tier[v] = nil
+        for tn, tier in ipairs(state.bangable) do
+            local done = false
+            for round=1,3,1 do
+                for v, _ in pairs(tier) do
+                    params:lookup_param(v):bang()
+                    tier[v] = nil
+                end
+                if next(tier) == nil then
+                    done = true
+                    break
+                end
             end
-            -- second round to pick up things we missed the first
-            for v, _ in pairs(tier) do
-                params:lookup_param(v):bang()
-                tier[v] = nil
-            end
-            if next(tier) ~= nil then
-                print("Missing modulation; too much recursion")
+            if not done then
+                print("Missing modulation; too much recursion", tn)
+                tab.print(tier)
+                state.bangable[tn] = {}
             end
         end
-        state.bangable = {{}, {}, {}, {}}
         state.bang_deferred = nil
     end
 end
@@ -168,15 +171,15 @@ end
 
 local make_seq = function(i, target_ids)
     params:add_group("sequence "..i, 9 + 16)
-    params:add_number(n(i, "pos"), "position", 1, 16, 1, nil, true)
+    params:add_number(n(i, "seq_pos"), "position", 1, 16, 1, nil, true)
     params:add_binary(n(i, "seq_active"), "active", "toggle", 1)
     params:add_number(n(i, "seq_length"), "length", 1, 16, 4)
-    params:add_control(n(i, "shred"), "shred", controlspec.new(0, 1, "lin", 0, 0))
-    params:add_control(n(i, "zero"), "zero", controlspec.new(0, 1, "lin", 0, 0))
-    params:add_trigger(n(i, "advance"), "advance")
-    params:lookup_param(n(i, "advance")).priority = 1
-    params:add_trigger(n(i, "reset"), "reset")
-    params:lookup_param(n(i, "reset")).priority = 2
+    params:add_control(n(i, "seq_shred"), "shred", controlspec.new(0, 1, "lin", 0, 0))
+    params:add_control(n(i, "seq_zero"), "zero", controlspec.new(0, 1, "lin", 0, 0))
+    params:add_trigger(n(i, "seq_advance"), "advance")
+    params:lookup_param(n(i, "seq_advance")).priority = 1
+    params:add_trigger(n(i, "seq_reset"), "reset")
+    params:lookup_param(n(i, "seq_reset")).priority = 2
     params:add_control(n(i, "seq_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
     params:add_option(n(i, "seq_target"), "target", target_ids, 1)
     local str_backup = make_string_option_backup(n(i, "seq_target"), target_ids)
@@ -186,7 +189,7 @@ local make_seq = function(i, target_ids)
         -- print("bang", target)
         if target == nil then return end
         if params:get(n(i, "seq_active")) > 0 then
-            local val = params:get(n(i, "seq_depth")) * params:get(n(i, "val_"..params:get(n(i, "pos"))))
+            local val = params:get(n(i, "seq_depth")) * params:get(n(i, "val_"..params:get(n(i, "seq_pos"))))
             -- print("setting mod for ", target.id, val)
             target.modulation["seq_"..i] = val
         else
@@ -195,22 +198,22 @@ local make_seq = function(i, target_ids)
         end
         defer_bang(target.id)
     end
-    params:set_action(n(i, "advance"), function() 
-        local pos = params:get_raw(n(i, "pos")) -- raw value
-        if math.random() < params:get(n(i, "shred")) then
+    params:set_action(n(i, "seq_advance"), function() 
+        local pos = params:get_unmodded(n(i, "seq_pos")) -- raw value
+        if math.random() < params:get(n(i, "seq_shred")) then
             -- randomize the old _modulated_ position
-            params:set(n(i, "val_"..params:get(n(i, "pos"))), math.random())
+            params:set(n(i, "val_"..params:get(n(i, "seq_pos"))), math.random())
         end
-        if math.random() < params:get(n(i, "zero")) then
+        if math.random() < params:get(n(i, "seq_zero")) then
             -- zero the old _modulated_ position
-            params:set(n(i, "val_"..params:get(n(i, "pos"))), 0)
+            params:set(n(i, "val_"..params:get(n(i, "seq_pos"))), 0)
         end
         -- set the new _raw_ position
-        params:set(n(i, "pos"), util.wrap(pos + 1, 1, params:get(n(i, "seq_length"))))
+        params:set(n(i, "seq_pos"), util.wrap(pos + 1, 1, params:get(n(i, "seq_length"))))
         bang()
     end)
-    params:set_action(n(i, "reset"), function()
-        params:set(n(i, "pos"), 1)
+    params:set_action(n(i, "seq_reset"), function()
+        params:set(n(i, "seq_pos"), 1)
         bang()
     end)
     params:set_action(n(i, "seq_target"), function(t)
@@ -236,7 +239,7 @@ local make_seq = function(i, target_ids)
     for j=1,16,1 do
         params:add_control(n(i, "val_"..j), "value "..j, controlspec.new(0, 1, "lin", 0, 0))
     end
-    params:set_action(n(i, "pos"), bang)
+    params:set_action(n(i, "seq_pos"), bang)
     params:set_action(n(i, "seq_active"), bang)
     params:set_action(n(i, "seq_length"), function(l)
         for j=1,16,1 do
@@ -246,20 +249,22 @@ local make_seq = function(i, target_ids)
                 params:hide(n(i, "val_"..j))
             end
         end
-        params:set(n(i, "pos"), util.wrap(params:get(n(i, "pos")), 1, params:get(n(i, "seq_length"))))
+        params:set(n(i, "seq_pos"), util.wrap(params:get(n(i, "seq_pos")), 1, params:get(n(i, "seq_length"))))
     end)
 end
 
 local make_mult = function(i, target_ids)
     params:add_group("mult "..i, 13)
-    params:add_control(n(i, "value"), "value", controlspec.new(-1, 1, "lin", 0, 0))
+    params:add_control(n(i, "mult_value"), "value", controlspec.new(-1, 1, "lin", 0, 0))
+    params:lookup_param(n(i, "mult_value")).priority = 2
     params:add_binary(n(i, "mult_active"), "active", "toggle", 1)
     local targets = {}
     local bang = function()
         for j=1,4,1 do
             if targets[j] ~= nil then
+                if targets[j].modulation == nil then targets[j].modulation = {} end
                 if params:get(n(i, "mult_active")) > 0 then
-                    targets[j].modulation["mult_"..i] = params:get(n(i, "mult_depth_"..j))*params:get(n(i, "value"))
+                    targets[j].modulation["mult_"..i] = params:get(n(i, "mult_depth_"..j))*params:get(n(i, "mult_value"))
                 else
                     targets[j].modulation["mult_"..i] = nil
                 end
@@ -267,8 +272,8 @@ local make_mult = function(i, target_ids)
             end
         end
     end
-    params:set_action(n(i, "value"), bang)
-    defer_bang(n(i, "value"))
+    params:set_action(n(i, "mult_value"), bang)
+    defer_bang(n(i, "mult_value"))
     params:set_action(n(i, "mult_active"), bang)
     for j=1,4,1 do
         params:add_control(n(i, "mult_depth_"..j), "depth "..j, controlspec.new(-1, 1, "lin", 0, 0))
@@ -312,14 +317,14 @@ local make_lfo = function(i, targets)
     defer_bang(n(i, "shape"))
     params:set_action(n(i, "shape"), function (s)
         if s == 2 or s == 3 then
-            params:show(n(i, "width"))
+            params:show(n(i, "lfo_width"))
         else
-            params:hide(n(i, "width"))
+            params:hide(n(i, "lfo_width"))
         end
         _menu.rebuild_params()
     end)
-    params:add_control(n(i, "width"), "width", controlspec.new(0, 1, "lin", 0, 0.5))
-    params:add_control(n(i, "depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
+    params:add_control(n(i, "lfo_width"), "width", controlspec.new(0, 1, "lin", 0, 0.5))
+    params:add_control(n(i, "lfo_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
     params:add_option(n(i, "lfo_target"), "target", targets, 1)
     local str_backup = make_string_option_backup(n(i, "lfo_target"), targets)
 
@@ -353,7 +358,7 @@ local make_lfo = function(i, targets)
         end
         phase = phase % 1
         local shape = params:get(n(i, "shape"))
-        local width = params:get(n(i, "width"))
+        local width = params:get(n(i, "lfo_width"))
         local value
         if shape == 1 then
             value = (math.sin(2*math.pi*phase) + 1)/2
@@ -377,7 +382,7 @@ local make_lfo = function(i, targets)
         end
         last_phase = phase
         if target.modulation == nil then target.modulation = {} end
-        target.modulation["lfo_"..i] = params:get(n(i, "depth")) * (value - 0.5*params:get(n(i, "lfo_bipolar")))
+        target.modulation["lfo_"..i] = params:get(n(i, "lfo_depth")) * (value - 0.5*params:get(n(i, "lfo_bipolar")))
         defer_bang(target.id, target.priority)
     end
     state.lfos[i] = state.lattice:new_pattern{
@@ -406,19 +411,19 @@ local make_rhythm = function(i, targets)
     end)
     defer_bang(n(i, "swing"))
     params:add_number(n(i, "rhythm_length"), "length", 1, 24, 8)
-    params:add_control(n(i, "fill"), "fill", controlspec.new(0, 1, "lin", 0, 1))
-    params:add_control(n(i, "offset"), "offset", controlspec.new(0, 1, "lin", 0, 0))
+    params:add_control(n(i, "rhythm_fill"), "fill", controlspec.new(0, 1, "lin", 0, 1))
+    params:add_control(n(i, "rhythm_offset"), "offset", controlspec.new(0, 1, "lin", 0, 0))
     defer_bang(n(i, "rhythm_length"))
     state.trigs[i] = {}
     local gen = function ()
         local l = params:get(n(i, "rhythm_length"))
-        local k = util.round(params:get(n(i, "fill"))*l, 1)
-        local w = util.round(params:get(n(i, "offset"))*l, 1)
+        local k = util.round(params:get(n(i, "rhythm_fill"))*l, 1)
+        local w = util.round(params:get(n(i, "rhythm_offset"))*l, 1)
         state.trigs[i] = er.gen(k, l, w)
     end
     params:set_action(n(i, "rhythm_length"), gen)
-    params:set_action(n(i, "fill"), gen)
-    params:set_action(n(i, "offset"), gen)
+    params:set_action(n(i, "rhythm_fill"), gen)
+    params:set_action(n(i, "rhythm_offset"), gen)
     gen()
     for _, v in ipairs(targets) do
         params:add_binary(n(i, "to_" .. v), "to ".. v, "toggle", 0)
@@ -496,18 +501,24 @@ local pre_init = function()
     
     for i=1,N_RHYTHMS,1 do
         table.insert(state.registered_binaries, n(i, "rhythm_active"))
-        table.insert(state.registered_numbers, n(i, "fill"))
-        table.insert(state.registered_numbers, n(i, "offset"))
+        table.insert(state.registered_numbers, n(i, "rhythm_fill"))
+        table.insert(state.registered_numbers, n(i, "rhythm_offset"))
     end
     for i=1,N_SEQS,1 do
         table.insert(state.registered_binaries, n(i, "seq_active"))
-        table.insert(state.registered_binaries, n(i, "advance"))
-        table.insert(state.registered_binaries, n(i, "reset"))
-        table.insert(state.registered_numbers, n(i, "shred"))
-        table.insert(state.registered_numbers, n(i, "zero"))
+        table.insert(state.registered_binaries, n(i, "seq_advance"))
+        table.insert(state.registered_binaries, n(i, "seq_reset"))
+        table.insert(state.registered_numbers, n(i, "seq_shred"))
+        table.insert(state.registered_numbers, n(i, "seq_zero"))
     end
     for i=1,N_LFOS,1 do
         table.insert(state.registered_binaries, n(i, "lfo_active"))
+    end
+    for i=1,N_MULTS,1 do
+        table.insert(state.registered_binaries, n(i, "mult_active"))
+        for j=1,4,1 do
+            table.insert(state.registered_numbers, n(i, "mult_value"))
+        end
     end
     init = function()
         print("about to init")

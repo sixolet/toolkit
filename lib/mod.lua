@@ -16,25 +16,26 @@ local N_LFOS = 4
 local N_MULTS = 4
 local N_SEQS = 4
 
-local state = {
+local toolkit = {
     registered_numbers = {},
     registered_binaries = {},
+    post_init = {},
 }
 
 function monkeypatch()
-    state.global_raw = false
+    toolkit.global_raw = false
     
     local core_write = params.write
     
     function params:write(filename, name)
-        local old_global_raw = state.global_raw
-        state.global_raw = true
+        local old_global_raw = toolkit.global_raw
+        toolkit.global_raw = true
         core_write(self, filename, name)
-        state.global_raw = old_global_raw
+        toolkit.global_raw = old_global_raw
     end
 
     function number:get(raw)
-        if self.modulation == nil or raw == true or state.global_raw then
+        if self.modulation == nil or raw == true or toolkit.global_raw then
             return self.value
         end
         local val = self.value
@@ -105,7 +106,7 @@ function monkeypatch()
         end
         return self:map_value(self:get_modulated_raw())
     end
-    state.monkeypatched = true
+    toolkit.monkeypatched = true
 end -- monkeypatch
 
 function params:get_unmodded(p)
@@ -117,8 +118,8 @@ local n = function(i, s)
 end
 
 local bang_all = function()
-    if state ~= nil then
-        for tn, tier in ipairs(state.bangable) do
+    if toolkit ~= nil then
+        for tn, tier in ipairs(toolkit.bangable) do
             local done = false
             for round=1,3,1 do
                 for v, _ in pairs(tier) do
@@ -133,26 +134,26 @@ local bang_all = function()
             if not done then
                 print("Missing modulation; too much recursion", tn)
                 tab.print(tier)
-                state.bangable[tn] = {}
+                toolkit.bangable[tn] = {}
             end
         end
-        state.bang_deferred = nil
+        toolkit.bang_deferred = nil
     end
 end
 
 local defer_bang = function(param, tier)
     if tier == nil then tier = 3 end
-    if state.bang_deferred == nil then
+    if toolkit.bang_deferred == nil then
         clock.run(function()
             clock.sleep(0)
             bang_all()
         end)
     end
-    state.bang_deferred = true
-    state.bangable[tier][param] = true
+    toolkit.bang_deferred = true
+    toolkit.bangable[tier][param] = true
 end
 
-state.defer_bang = defer_bang
+toolkit.defer_bang = defer_bang
 
 local make_string_option_backup = function(id, options)
     local str_id = (id .. "_str")
@@ -169,6 +170,47 @@ local make_string_option_backup = function(id, options)
     return str_id
 end
 
+function toolkit.add_number_target(id, name, mod_id, target_ids, mod_getter)
+    local ret = {}
+    params:add_option(id, name, target_ids, 1)
+    ret.str_backup = make_string_option_backup(id, target_ids)
+    params:set_action(id, function(t)
+        local str_id = target_ids[params:get(id)]
+        if ret.target ~= nil and ret.target.modulation ~= nil then
+            print("removing modulation for ", target.id)
+            ret.target.modulation[mod_id] = nil
+            toolkit.defer_bang(target.id)
+        end
+        if params:get(id) == 1 then
+            ret.target = nil
+            params:set(ret.str_backup, "", true)
+        else
+            params:set(ret.str_backup, str_id, true)
+            ret.target = params:lookup_param(str_id)
+            if ret.target.modulation == nil then
+                ret.target.modulation = {}
+            end
+            if mod_getter ~= nil then
+                ret.target.modulation[mod_id] = mod_getter()
+                toolkit.defer_bang(ret.target.id, ret.target.priority)
+            end
+        end
+    end)
+    function ret:update()
+        if self.target == nil or mod_getter == nil then
+            return
+        end
+        self.target.modulation[mod_id] = mod_getter()
+        toolkit.defer_bang(self.target.id, self.target.priority)
+    end
+    function ret:modulate(val)
+        if self.target == nil then return end
+        self.target.modulation[mod_id] = val
+        toolkit.defer_bang(self.target.id, self.target.priority)
+    end
+    return ret
+end
+
 local make_seq = function(i, target_ids)
     params:add_group("sequence "..i, 9 + 16)
     params:add_number(n(i, "seq_pos"), "position", 1, 16, 1, nil, true)
@@ -181,23 +223,16 @@ local make_seq = function(i, target_ids)
     params:add_trigger(n(i, "seq_reset"), "reset")
     params:lookup_param(n(i, "seq_reset")).priority = 2
     params:add_control(n(i, "seq_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
-    params:add_option(n(i, "seq_target"), "target", target_ids, 1)
-    local str_backup = make_string_option_backup(n(i, "seq_target"), target_ids)
-    defer_bang(n(i, "seq_length"))
-    local target = nil
-    local bang = function(p)
-        -- print("bang", target)
-        if target == nil then return end
+    local mod_value = function()
         if params:get(n(i, "seq_active")) > 0 then
-            local val = params:get(n(i, "seq_depth")) * params:get(n(i, "val_"..params:get(n(i, "seq_pos"))))
-            -- print("setting mod for ", target.id, val)
-            target.modulation["seq_"..i] = val
+            return params:get(n(i, "seq_depth")) * params:get(n(i, "val_"..params:get(n(i, "seq_pos"))))
         else
-            -- print("setting nil for ", target.id)
-            target.modulation["seq_"..i] = nil
+            return nil
         end
-        defer_bang(target.id)
     end
+        
+    local target = toolkit.add_number_target(n(i, "seq_target"), "target", "seq_"..i, target_ids, mod_value)
+    defer_bang(n(i, "seq_length"))
     params:set_action(n(i, "seq_advance"), function() 
         local pos = params:get_unmodded(n(i, "seq_pos")) -- raw value
         if math.random() < params:get(n(i, "seq_shred")) then
@@ -210,37 +245,18 @@ local make_seq = function(i, target_ids)
         end
         -- set the new _raw_ position
         params:set(n(i, "seq_pos"), util.wrap(pos + 1, 1, params:get(n(i, "seq_length"))))
-        bang()
+        target:update()
     end)
     params:set_action(n(i, "seq_reset"), function()
         params:set(n(i, "seq_pos"), 1)
-        bang()
-    end)
-    params:set_action(n(i, "seq_target"), function(t)
-        local str_id = target_ids[params:get(n(i, "seq_target"))]
-        if target ~= nil and target.modulation ~= nil then
-            print("removing modulation for ", target.id)
-            target.modulation["seq_"..i] = nil
-            defer_bang(target.id)
-        end
-        if params:get(n(i, "seq_target")) == 1 then
-            target = nil
-            params:set(str_backup, "", true)
-        else
-            params:set(str_backup, str_id, true)
-            target = params:lookup_param(str_id)
-            if target.modulation == nil then
-                target.modulation = {}
-            end
-        end
-        bang()
+        target:update()
     end)
 
     for j=1,16,1 do
         params:add_control(n(i, "val_"..j), "value "..j, controlspec.new(0, 1, "lin", 0, 0))
     end
-    params:set_action(n(i, "seq_pos"), bang)
-    params:set_action(n(i, "seq_active"), bang)
+    params:set_action(n(i, "seq_pos"), function() target:update() end)
+    params:set_action(n(i, "seq_active"), function() target:update() end)
     params:set_action(n(i, "seq_length"), function(l)
         for j=1,16,1 do
             if j <= l then
@@ -259,17 +275,18 @@ local make_mult = function(i, target_ids)
     params:lookup_param(n(i, "mult_value")).priority = 2
     params:add_binary(n(i, "mult_active"), "active", "toggle", 1)
     local targets = {}
+    local get_getter = function(j)
+        return function()
+            if params:get(n(i, "mult_active")) > 0 then
+                return params:get(n(i, "mult_depth_"..j))*params:get(n(i, "mult_value"))
+            else
+                return nil
+            end
+        end
+    end
     local bang = function()
         for j=1,4,1 do
-            if targets[j] ~= nil then
-                if targets[j].modulation == nil then targets[j].modulation = {} end
-                if params:get(n(i, "mult_active")) > 0 then
-                    targets[j].modulation["mult_"..i] = params:get(n(i, "mult_depth_"..j))*params:get(n(i, "mult_value"))
-                else
-                    targets[j].modulation["mult_"..i] = nil
-                end
-                defer_bang(targets[j].id, targets[j].priority)
-            end
+            targets[j]:update()
         end
     end
     params:set_action(n(i, "mult_value"), bang)
@@ -277,22 +294,7 @@ local make_mult = function(i, target_ids)
     params:set_action(n(i, "mult_active"), bang)
     for j=1,4,1 do
         params:add_control(n(i, "mult_depth_"..j), "depth "..j, controlspec.new(-1, 1, "lin", 0, 0))
-        params:add_option(n(i, "mult_target_"..j), "target "..j, target_ids, 1)
-        local str_backup = make_string_option_backup(n(i, "mult_target_"..j), target_ids)
-
-        params:set_action(n(i, "mult_target_"..j), function(t)
-            if targets[j] ~= nil and targets[j].modulation ~= nil then
-                targets[j].modulation["mult_"..i] = nil
-                defer_bang(targets[j].id, targets[j].priority)
-            end
-            if params:get(n(i, "mult_target_"..j)) == 1 then
-                targets[j] = nil
-                params:set(str_backup, "", true)
-            else
-                targets[j] = params:lookup_param(target_ids[params:get(n(i, "mult_target_"..j))])
-                params:set(str_backup, targets[j].id, true)
-            end
-        end)
+        targets[j] = toolkit.add_number_target(n(i, "mult_target_"..j), "target "..j, "mult_"..j, target_ids, get_getter(j))
     end
 end
 
@@ -325,28 +327,13 @@ local make_lfo = function(i, targets)
     end)
     params:add_control(n(i, "lfo_width"), "width", controlspec.new(0, 1, "lin", 0, 0.5))
     params:add_control(n(i, "lfo_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
-    params:add_option(n(i, "lfo_target"), "target", targets, 1)
-    local str_backup = make_string_option_backup(n(i, "lfo_target"), targets)
 
-    local target = nil
-    params:set_action(n(i, "lfo_target"), function(t)
-        if target ~= nil and target.modulation ~= nil then
-            print("removing modulation for ", target.id)
-            target.modulation["lfo_"..i] = nil
-            defer_bang(target.id, target.priority)
-        end
-        if params:get(n(i, "lfo_target")) == 1 then
-            target = nil
-            params:set(str_backup, "", true)
-        else
-            target = params:lookup_param(targets[params:get(n(i, "lfo_target"))])
-            params:set(str_backup, target.id, true)
-        end
-    end)
+    local target = toolkit.add_number_target(n(i, "lfo_target"), "target", "lfo_"..i, targets)
+
     local last_phase = 0
     local rand_value = 0
     local tick = function()
-        if target == nil then
+        if target.target == nil then
             return
         end
         local t = clock.get_beats()
@@ -381,11 +368,9 @@ local make_lfo = function(i, targets)
             value = rand_value
         end
         last_phase = phase
-        if target.modulation == nil then target.modulation = {} end
-        target.modulation["lfo_"..i] = params:get(n(i, "lfo_depth")) * (value - 0.5*params:get(n(i, "lfo_bipolar")))
-        defer_bang(target.id, target.priority)
+        target:modulate(params:get(n(i, "lfo_depth")) * (value - 0.5*params:get(n(i, "lfo_bipolar"))))
     end
-    state.lfos[i] = state.lattice:new_pattern{
+    toolkit.lfos[i] = toolkit.lattice:new_pattern{
         enabled = true,
         division = 1/96,
         action = tick,
@@ -397,29 +382,29 @@ local make_rhythm = function(i, targets)
     params:add_binary(n(i, "rhythm_active"), "active", "toggle", 1)
     params:add_option(n(i, "div"), "division", DIVISION_OPTS, 7)
     params:set_action(n(i, "div"), function(d)
-        state.rhythms[i]:set_division(DIVISIONS[d])
+        toolkit.rhythms[i]:set_division(DIVISIONS[d])
         -- This arcane machination is required to preserve appropriate swing and beats when changing divisions.
-        local tick_length = state.rhythms[i].division * state.lattice.ppqn * state.lattice.meter
-        local two_phase = (state.lattice.transport % (2*tick_length))/tick_length
-        state.rhythms[i].phase = state.lattice.transport % tick_length
-        state.rhythms[i].downbeat = (two_phase < 1)
+        local tick_length = toolkit.rhythms[i].division * toolkit.lattice.ppqn * toolkit.lattice.meter
+        local two_phase = (toolkit.lattice.transport % (2*tick_length))/tick_length
+        toolkit.rhythms[i].phase = toolkit.lattice.transport % tick_length
+        toolkit.rhythms[i].downbeat = (two_phase < 1)
     end)
     defer_bang(n(i, "div"))
     params:add_control(n(i, "swing"), "swing", controlspec.new(50, 90, "lin", 0, 50))
     params:set_action(n(i, "swing"), function(d)
-        state.rhythms[i]:set_swing(d)
+        toolkit.rhythms[i]:set_swing(d)
     end)
     defer_bang(n(i, "swing"))
     params:add_number(n(i, "rhythm_length"), "length", 1, 24, 8)
     params:add_control(n(i, "rhythm_fill"), "fill", controlspec.new(0, 1, "lin", 0, 1))
     params:add_control(n(i, "rhythm_offset"), "offset", controlspec.new(0, 1, "lin", 0, 0))
     defer_bang(n(i, "rhythm_length"))
-    state.trigs[i] = {}
+    toolkit.trigs[i] = {}
     local gen = function ()
         local l = params:get(n(i, "rhythm_length"))
         local k = util.round(params:get(n(i, "rhythm_fill"))*l, 1)
         local w = util.round(params:get(n(i, "rhythm_offset"))*l, 1)
-        state.trigs[i] = er.gen(k, l, w)
+        toolkit.trigs[i] = er.gen(k, l, w)
     end
     params:set_action(n(i, "rhythm_length"), gen)
     params:set_action(n(i, "rhythm_fill"), gen)
@@ -438,9 +423,9 @@ local make_rhythm = function(i, targets)
             if params:get(n(i, "to_"..v)) > 0 then
                 local p = params:lookup_param(v)
                 if p.t == params.tBINARY then
-                    if state.trigs[i][t] then p:set(1) else p:set(0) end
+                    if toolkit.trigs[i][t] then p:set(1) else p:set(0) end
                 elseif p.t == params.tTRIGGER then
-                    if state.trigs[i][t] then 
+                    if toolkit.trigs[i][t] then 
                         --params:lookup_param(p.id):bang()
                         defer_bang(p.id)
                     end
@@ -449,7 +434,7 @@ local make_rhythm = function(i, targets)
         end
         t = util.wrap(t + 1, 1, params:get(n(i, "rhythm_length")))
     end    
-    state.rhythms[i] = state.lattice:new_pattern{
+    toolkit.rhythms[i] = toolkit.lattice:new_pattern{
         enabled = true,
         division = DIVISIONS[params:get(n(i, "div"))],
         swing = params:get(n(i, "swing")),
@@ -458,11 +443,11 @@ local make_rhythm = function(i, targets)
 end
 
 local get_binaries = function() 
-    ret = {table.unpack(state.registered_binaries)}
+    ret = {table.unpack(toolkit.registered_binaries)}
 
     for k,v in pairs(params.params) do
         if (v.t == params.tBINARY or v.t == params.tTRIGGER) and v.id ~= nil then
-            if v.id:find("tk_%d+_to_") == nil and not tab.contains(state.registered_binaries, v.id) then
+            if v.id:find("tk_%d+_to_") == nil and not tab.contains(toolkit.registered_binaries, v.id) then
                 table.insert(ret, v.id)
             end
         end
@@ -472,12 +457,12 @@ end
 
 local get_numericals = function()
     ret = {"none"}
-    for _, v in ipairs(state.registered_numbers) do
+    for _, v in ipairs(toolkit.registered_numbers) do
         table.insert(ret, v)
     end
     for k,v in pairs(params.params) do
         if (v.t == params.tCONTROL or v.t == params.tNUMBER or v.t == params.tTAPER) and v.id ~= nil then
-            if not tab.contains(state.registered_numbers, v.id) then
+            if not tab.contains(toolkit.registered_numbers, v.id) then
                 if v.id == "output_level" or v.id == "input_level" or v.id == "monitor_level" or v.id == "engine_level" or v.id == "softcut_level" or v.id == "tape_level" then
                     -- pass
                 else
@@ -492,71 +477,81 @@ end
 local pre_init = function()
     print("pre-init")
     local init1 = init
-    state.lattice = lattice:new()
-    state.rhythms = {}
-    state.lfos = {}
-    state.bangable = {{}, {}, {}, {}}
-    state.trigs = {}
+    toolkit.lattice = lattice:new()
+    toolkit.rhythms = {}
+    toolkit.lfos = {}
+    toolkit.bangable = {{}, {}, {}, {}}
+    toolkit.trigs = {}
     -- cleaning up the registered numbers and booleans are handled in cleanup
     
     for i=1,N_RHYTHMS,1 do
-        table.insert(state.registered_binaries, n(i, "rhythm_active"))
-        table.insert(state.registered_numbers, n(i, "rhythm_fill"))
-        table.insert(state.registered_numbers, n(i, "rhythm_offset"))
+        table.insert(toolkit.registered_binaries, n(i, "rhythm_active"))
+        table.insert(toolkit.registered_numbers, n(i, "rhythm_fill"))
+        table.insert(toolkit.registered_numbers, n(i, "rhythm_offset"))
     end
     for i=1,N_SEQS,1 do
-        table.insert(state.registered_binaries, n(i, "seq_active"))
-        table.insert(state.registered_binaries, n(i, "seq_advance"))
-        table.insert(state.registered_binaries, n(i, "seq_reset"))
-        table.insert(state.registered_numbers, n(i, "seq_shred"))
-        table.insert(state.registered_numbers, n(i, "seq_zero"))
+        table.insert(toolkit.registered_binaries, n(i, "seq_active"))
+        table.insert(toolkit.registered_binaries, n(i, "seq_advance"))
+        table.insert(toolkit.registered_binaries, n(i, "seq_reset"))
+        table.insert(toolkit.registered_numbers, n(i, "seq_shred"))
+        table.insert(toolkit.registered_numbers, n(i, "seq_zero"))
     end
     for i=1,N_LFOS,1 do
-        table.insert(state.registered_binaries, n(i, "lfo_active"))
+        table.insert(toolkit.registered_binaries, n(i, "lfo_active"))
     end
     for i=1,N_MULTS,1 do
-        table.insert(state.registered_binaries, n(i, "mult_active"))
+        table.insert(toolkit.registered_binaries, n(i, "mult_active"))
         for j=1,4,1 do
-            table.insert(state.registered_numbers, n(i, "mult_value"))
+            table.insert(toolkit.registered_numbers, n(i, "mult_value"))
         end
+    end
+    toolkit.post_init["toolkit"] = function() 
+        for i=1,N_RHYTHMS,1 do
+            make_rhythm(i, toolkit.binaries)
+        end
+        for i=1,N_LFOS,1 do
+            make_lfo(i, toolkit.numbers)
+        end
+        for i=1,N_MULTS,1 do
+            make_mult(i, toolkit.numbers)
+        end
+        for i=1,N_SEQS,1 do
+            make_seq(i, toolkit.numbers)
+        end        
     end
     init = function()
         print("about to init")
         init1()
         print("post init")
-        local binaries = get_binaries()
-        local numbers = get_numericals()
-        for i=1,N_RHYTHMS,1 do
-            make_rhythm(i, binaries)
+        toolkit.binaries = get_binaries()
+        toolkit.numbers = get_numericals()
+        for _, f in pairs(toolkit.post_init) do
+            f()
         end
-        for i=1,N_LFOS,1 do
-            make_lfo(i, numbers)
-        end
-        for i=1,N_MULTS,1 do
-            make_mult(i, numbers)
-        end
-        for i=1,N_SEQS,1 do
-            make_seq(i, numbers)
-        end
+        
         -- after adding our params, we want to re-load default/existing values
         -- but, we don't want to re-bang script params, 
         -- or bang our params which have conflicting side-effects
         params:read(nil, true)
         bang_all()
         print("Starting")
-        state.lattice:start()
+        toolkit.lattice:start()
     end
 end
 
 
 local post_cleanup = function()
     print("post cleanup")
-    state.lattice:destroy()
-    state.registered_numbers = {}
-    state.registered_binaries = {}
+    if toolkit.lattice ~= nil then
+        toolkit.lattice:destroy()
+        toolkit.lattice = nil
+    end
+    toolkit.registered_numbers = {}
+    toolkit.registered_binaries = {}
+    toolkit.post_init = {}
 end
 mod.hook.register("system_post_startup", "toolkit post startup", monkeypatch)
 mod.hook.register("script_pre_init", "toolkit pre init", pre_init)
 mod.hook.register("script_post_cleanup", "toolkit post clean", post_cleanup)
 
-return state
+return toolkit

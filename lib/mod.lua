@@ -177,9 +177,9 @@ function toolkit.add_number_target(id, name, mod_id, target_ids, mod_getter)
     params:set_action(id, function(t)
         local str_id = target_ids[params:get(id)]
         if ret.target ~= nil and ret.target.modulation ~= nil then
-            print("removing modulation for ", target.id)
+            -- print("removing modulation for ", ret.target.id)
             ret.target.modulation[mod_id] = nil
-            toolkit.defer_bang(target.id)
+            toolkit.defer_bang(ret.target.id)
         end
         if params:get(id) == 1 then
             ret.target = nil
@@ -549,6 +549,7 @@ local post_cleanup = function()
     toolkit.registered_numbers = {}
     toolkit.registered_binaries = {}
     toolkit.post_init = {}
+    toolkit.bangable = {}
 end
 mod.hook.register("system_post_startup", "toolkit post startup", monkeypatch)
 mod.hook.register("script_pre_init", "toolkit pre init", pre_init)

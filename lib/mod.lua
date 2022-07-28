@@ -7,6 +7,9 @@ local number = require 'core/params/number'
 local control = require 'core/params/control'
 local taper = require 'core/params/taper'
 
+local menu = require('toolkit/lib/menu')
+local matrix = require('toolkit/lib/modmatrix')
+
 local DIVISIONS = {1/16, 1/12, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 3/4, 1, 5/4, 6/4, 7/4, 2, 4, 8, 32, 64, 128}
 local DIVISION_OPTS = {
     "1/16", "1/12", "1/8", "1/7", "1/6", "1/5", "1/4", "1/3", "1/2", "3/4", "4/4", "5/4", "6/4", "7/4", "2", "4", "8", "32", "64", "128"}
@@ -62,18 +65,18 @@ function monkeypatch()
     function taper:get_modulated_raw()
         if self.modulation == nil then
             return self.value
-    else
-        local val = self.value
-        for _, v in pairs(self.modulation) do
-            val = val + v
-        end
-        if controlspec.wrap then
-            val = val % 1
         else
-            val = util.clamp(val, 0, 1)
+            local val = self.value
+            for _, v in pairs(self.modulation) do
+                val = val + v
+            end
+            if controlspec.wrap then
+                val = val % 1
+            else
+                val = util.clamp(val, 0, 1)
+            end
+            return val
         end
-        return val
-    end
     end
 
     function taper:get(raw)
@@ -223,6 +226,7 @@ local make_seq = function(i, target_ids)
     params:add_trigger(n(i, "seq_reset"), "reset")
     params:lookup_param(n(i, "seq_reset")).priority = 2
     params:add_control(n(i, "seq_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
+    matrix:add_unipolar("seq_"..i, "seq "..i)
     local mod_value = function()
         if params:get(n(i, "seq_active")) > 0 then
             return params:get(n(i, "seq_depth")) * params:get(n(i, "val_"..params:get(n(i, "seq_pos"))))
@@ -245,18 +249,26 @@ local make_seq = function(i, target_ids)
         end
         -- set the new _raw_ position
         params:set(n(i, "seq_pos"), util.wrap(pos + 1, 1, params:get(n(i, "seq_length"))))
+        matrix:set("seq_"..i, mod_value())
         target:update()
     end)
     params:set_action(n(i, "seq_reset"), function()
         params:set(n(i, "seq_pos"), 1)
+        matrix:set("seq_"..i, mod_value())
         target:update()
     end)
 
     for j=1,16,1 do
         params:add_control(n(i, "val_"..j), "value "..j, controlspec.new(0, 1, "lin", 0, 0))
     end
-    params:set_action(n(i, "seq_pos"), function() target:update() end)
-    params:set_action(n(i, "seq_active"), function() target:update() end)
+    params:set_action(n(i, "seq_pos"), function()
+        matrix:set("seq_"..i, mod_value())
+        target:update()
+    end)
+    params:set_action(n(i, "seq_active"), function()
+        matrix:set("seq_"..i, mod_value())
+        target:update()
+    end)
     params:set_action(n(i, "seq_length"), function(l)
         for j=1,16,1 do
             if j <= l then
@@ -327,7 +339,7 @@ local make_lfo = function(i, targets)
     end)
     params:add_control(n(i, "lfo_width"), "width", controlspec.new(0, 1, "lin", 0, 0.5))
     params:add_control(n(i, "lfo_depth"), "depth", controlspec.new(-1, 1, "lin", 0, 0))
-
+    matrix:add_unipolar("lfo_"..i, "lfo "..i)
     local target = toolkit.add_number_target(n(i, "lfo_target"), "target", "lfo_"..i, targets)
 
     local last_phase = 0
@@ -369,6 +381,7 @@ local make_lfo = function(i, targets)
         end
         last_phase = phase
         target:modulate(params:get(n(i, "lfo_depth")) * (value - 0.5*params:get(n(i, "lfo_bipolar"))))
+        matrix:set("lfo_"..i, (value - 0.5*params:get(n(i, "lfo_bipolar"))))
     end
     toolkit.lfos[i] = toolkit.lattice:new_pattern{
         enabled = true,
@@ -409,6 +422,7 @@ local make_rhythm = function(i, targets)
     params:set_action(n(i, "rhythm_length"), gen)
     params:set_action(n(i, "rhythm_fill"), gen)
     params:set_action(n(i, "rhythm_offset"), gen)
+    matrix:add_binary("rhythm_"..i, "rhythm "..i)
     gen()
     for _, v in ipairs(targets) do
         params:add_binary(n(i, "to_" .. v), "to ".. v, "toggle", 0)
@@ -423,11 +437,18 @@ local make_rhythm = function(i, targets)
             if params:get(n(i, "to_"..v)) > 0 then
                 local p = params:lookup_param(v)
                 if p.t == params.tBINARY then
-                    if toolkit.trigs[i][t] then p:set(1) else p:set(0) end
+                    if toolkit.trigs[i][t] then 
+                        p:set(1)
+                        matrix:set("rhythm_"..i, 1)
+                    else
+                        p:set(0)
+                        matrix:set("rhythm_"..i, 0)
+                    end
                 elseif p.t == params.tTRIGGER then
                     if toolkit.trigs[i][t] then 
                         --params:lookup_param(p.id):bang()
                         defer_bang(p.id)
+                        matrix:set("rhythm_"..i, 1)
                     end
                 end
             end
@@ -550,9 +571,12 @@ local post_cleanup = function()
     toolkit.registered_binaries = {}
     toolkit.post_init = {}
     toolkit.bangable = {}
+    matrix:clear()
 end
 mod.hook.register("system_post_startup", "toolkit post startup", monkeypatch)
 mod.hook.register("script_pre_init", "toolkit pre init", pre_init)
 mod.hook.register("script_post_cleanup", "toolkit post clean", post_cleanup)
+
+mod.menu.register("toolkit", menu)
 
 return toolkit

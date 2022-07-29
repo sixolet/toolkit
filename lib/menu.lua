@@ -99,7 +99,7 @@ m.key = function(n,z)
         m.pos = n-1
       else
         build_sources(t)
-        m.paramname = params:string(i)
+        m.paramname = params:lookup_param(i).name
         m.param_id = i
         m.oldpos = m.pos
         m.pos = 0
@@ -108,12 +108,20 @@ m.key = function(n,z)
     end
     -- PARAM
   elseif m.mode == mSOURCE then
+    local i = m.pos+1
     if n == 2 and z == 1 then 
       -- back
       m.pos = m.oldpos
       m.mode = mPARAM
+      m.calculated = false
+      if m.group == true then
+        build_sub(m.groupid)
+      else
+        build_page()
+      end
     elseif n == 3 and z == 1 then
-      matrix:set_depth(paramname, i, nil)
+      matrix:set_depth(m.param_id, i, nil)
+      m.calculated = false
     end
   end
   _menu.redraw()
@@ -126,6 +134,23 @@ m.enc = function(n,d)
       m.pos = util.clamp(m.pos + d, 0, #page - 1)
       if m.pos ~= prev then m.redraw() end
     -- jump section
+    elseif m.mode == mSOURCE and n==3 then
+      local i = m.pos+1
+      local source = matrix:lookup_source(i)
+      local param = params:lookup_param(m.param_id)
+      if param.t == params.tBINARY or param.t == params.tTRIGGER then
+        if d > 0 then 
+            matrix:set_depth(m.param_id, i, 1)
+        else
+            matrix:set_depth(m.param_id, i, nil)
+        end
+      else
+        local depth = matrix:get_depth(m.param_id, i)
+        if depth == nil then depth = 0 end
+        depth = depth + 0.01 * d
+        matrix:set_depth(m.param_id, i, depth)
+        m.calculated = false
+      end
     elseif m.mode == mPARAM and n==2 and m.alt==true then
       d = d>0 and 1 or -1
       local i = m.pos+1
@@ -166,6 +191,57 @@ function m.modulation_of(p)
     else
         return nil
     end
+end
+
+function m.calculate_min_max()
+  if m.calculated then return end
+  local param = params:lookup_param(m.param_id)
+  if param.t == params.tBINARY or param.t == params.tTRIGGER then
+    m.max_string = "1"
+    m.min_string = "0"
+    m.calculated = true
+    return
+  end
+  local min_modulation = 0
+  local max_modulation = 0
+  for i, source in ipairs(matrix.sources_list) do
+    local depth = matrix:get_depth(m.param_id, i)
+    if depth ~= nil then
+      if source.t == matrix.tBINARY or source.t == matrix.tUNIPOLAR then
+        if depth > 0 then
+          max_modulation = max_modulation + depth
+        else
+          min_modulation = min_modulation + depth
+        end
+      elseif source.t == matrix.tBIPOLAR then
+        max_modulation = max_modulation + math.abs(depth)
+        min_modulation = min_modulation - math.abs(depth)
+      end
+    end
+  end
+  if max_modulation == 0 and min_modulation == 0 then
+    m.max_string = ""
+    m.min_string = ""
+    calculated = true
+    return
+  end
+  if param.t == params.tTAPER or param.t == params.tCONTROL then
+    local raw = param:get_raw()
+    m.max_string = string.format("%.2f", param:map_value(raw+max_modulation))
+    m.min_string = string.format("%.2f", param:map_value(raw+min_modulation))
+  elseif param.t == params.tNUMBER then
+    local value = param.value
+    local range = param:get_range()
+    local pos_swing = util.linlin(0, 1, 0, range[2] - range[1], max_modulation)
+    local neg_swing = util.linlin(0, 1, 0, range[2] - range[1], math.abs(min_modulation))
+    m.max_string = string.format("%i", util.clamp(math.ceil(value + pos_swing), range[1], range[2]))
+    m.min_string = string.format("%i", util.clamp(math.floor(value - neg_swing), range[1], range[2]))
+  else
+    m.max_string = ""
+    m.min_string = ""
+  end
+
+  m.calculated = true
 end
 
 m.redraw = function()
@@ -217,12 +293,21 @@ m.redraw = function()
       end
     end
   elseif m.mode == mSOURCE then
+    m.calculate_min_max()
     if m.pos == 0 then
       local n = "SOURCES"
       n = n .. " / " .. m.paramname
       screen.level(4)
       screen.move(0,10)
       screen.text(n)
+      local min_depth = 0
+      local max_depth = 0
+      screen.move(127, 10)
+      if m.min_string ~= m.max_string then
+        screen.text_right(m.min_string.."-"..m.max_string)
+      else
+        screen.text_right(params:string(m.param_id))
+      end
     end
     for i=1,6 do
       if (i > 2 - m.pos) and (i < #page - m.pos + 3) then

@@ -1,3 +1,7 @@
+local number = require 'core/params/number'
+local control = require 'core/params/control'
+local taper = require 'core/params/taper'
+
 local ModMatrix = {
     tBINARY = 1,
     tUNIPOLAR = 2,
@@ -7,6 +11,142 @@ local ModMatrix = {
     sources_list = {}, -- List of mod sources
     sources_indexes = {}, -- mod sources by index
 }
+
+function ModMatrix:install()
+    -- Only install once
+    if self.installed then return end
+    
+    self.global_raw = false
+    local outer_self = self
+    
+    local core_write = params.write
+    
+    function params:write(filename, name)
+        local old_global_raw = outer_self.global_raw
+        outer_self.global_raw = true
+        core_write(self, filename, name)
+        outer_self.global_raw = old_global_raw
+    end
+
+    function number:get(raw)
+        if self.modulation == nil or raw == true or outer_self.global_raw then
+            return self.value
+        end
+        local val = self.value
+        for _, v in pairs(self.modulation) do
+            val = val + (v*self.range)
+        end
+        val = util.round(val, 1)
+        if self.wrap then
+            val = util.wrap(val, self.min, self.max)
+        else
+            val = util.clamp(val, self.min, self.max)
+        end
+        return val
+    end
+
+    function number:bang()
+        self.action(self:get())
+    end
+    
+    function number:delta(d)
+        self:set(self:get(true) + d)
+    end
+
+    function taper:get_modulated_raw()
+        if self.modulation == nil then
+            return self.value
+        else
+            local val = self.value
+            for _, v in pairs(self.modulation) do
+                val = val + v
+            end
+            if controlspec.wrap then
+                val = val % 1
+            else
+                val = util.clamp(val, 0, 1)
+            end
+            return val
+        end
+    end
+
+    function taper:get(raw)
+        if raw == true then
+            return self:map_value(self.value)
+        end
+        return self:map_value(self:get_modulated_raw())
+    end
+
+    function control:get_modulated_raw()
+        if self.modulation == nil then
+            return self.raw
+        else
+            local val = self.raw
+            for _, v in pairs(self.modulation) do
+                val = val + v
+            end
+            if controlspec.wrap then
+                val = val % 1
+            else
+                val = util.clamp(val, 0, 1)
+            end
+            return val
+        end
+    end
+
+    function control:get(unmodded)
+        if unmodded == true then
+            return self:map_value(self.raw)
+        end
+        return self:map_value(self:get_modulated_raw())
+    end
+
+    function params:get_unmodded(p)
+        return self:lookup_param(p):get(true)
+    end
+    
+    -- Since a script might use the official write callback, we
+    -- are wrapping the write function instead. Ugly, I know.
+    local old_write = params.write
+    function params:write(filename, name)
+      outer_self.pset_filename = filename or 1
+      local pset_number;
+      if type(outer_self.pset_filename) == "number" then
+        local n = outer_self.pset_filename
+        outer_self.pset_filename = norns.state.data .. norns.state.shortname
+        pset_number = string.format("%02d",n)
+        outer_self.pset_filename = outer_self.pset_filename .. "-" .. pset_number .. ".pset"
+      end
+      outer_self.matrix_filename = outer_self.pset_filename .. ".matrix"
+      local err = tab.save(outer_self.matrix, outer_self.matrix_filename)
+      if err then
+        print("Failed to save matrix data", err)
+      end
+      old_write(self, filename, name)
+    end
+    
+    local old_read = params.read
+    function params:read(filename, silent)
+      outer_self.pset_filename = filename or norns.state.pset_last
+      local pset_number;
+      if type(outer_self.pset_filename) == "number" then
+        local n = outer_self.pset_filename
+        outer_self.pset_filename = norns.state.data .. norns.state.shortname
+        pset_number = string.format("%02d",n)
+        outer_self.pset_filename = outer_self.pset_filename .. "-" .. pset_number .. ".pset"
+      end
+      outer_self.matrix_filename = outer_self.pset_filename .. ".matrix"
+      print("loading matrix from", outer_self.matrix_filename)
+      outer_self.matrix, err = tab.load(outer_self.matrix_filename)
+      if err then
+        outer_self.matrix = {}
+        print("Error reading matrix data:", err)
+      end
+      old_read(self, filename, silent)
+    end
+    
+    self.installed = true
+end -- install
 
 function ModMatrix:bang_all()
     for tn, tier in ipairs(self.bangers) do
@@ -126,18 +266,28 @@ function ModMatrix:get_depth(param_id, modulation_id)
     return self.matrix[modulation_id][param_id]
 end
 
+function ModMatrix:used(modulation_id)
+    if type(modulation_id) == "number" then
+        modulation_id = self.sources_list[modulation_id].id
+    end
+    if self.matrix[modulation_id] == nil then return false end
+    if next(self.matrix[modulation_id]) == nil then return false end
+    return true
+end
+
 function ModMatrix:set(modulation_id, value)
     local source = self:lookup_source(modulation_id)
     source.value = value
     if self.matrix[source.id] == nil then self.matrix[source.id] = {} end
     local targets = self.matrix[source.id]
     for param_id, depth in pairs(targets) do
-        local p = param:lookup_param(param_id)
+        local p = params:lookup_param(param_id)
+        if p.modulation == nil then p.modulation = {} end
         p.modulation[source.id] = nilmul(depth, value)
         if p.t ~= params.tTRIGGER then
-            params:defer_bang(p.id, p.priority)
+            self:defer_bang(p.id, p.priority)
         elseif value > 0 then
-            params:defer_bang(p.id, p.priority)
+            self:defer_bang(p.id, p.priority)
         end
     end
 end

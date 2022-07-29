@@ -4,7 +4,11 @@ She's running a whole makerspace now, she doesn't need it.
 
 `toolkit` is a mod for Monome Norns.
 
-Aunt Pam's `toolkit` contains a pile of LFOs, rhythms, sequencers, and mults. Each can be used to modulate other parameters. When you're modulating one parameter with more than one modulator, the modulations mix additively into their target, and you can still also midi-map or change that parameter directly (and it'll change the "core" unmodulated value, without changing the modulations). 
+Aunt Pam's `toolkit` contains a pile of LFOs, rhythms, sequencers, and mults. Each can be used to modulate other parameters. When you're modulating one parameter with more than one modulator, the modulations mix additively into their target, and you can still also midi-map or change that parameter directly (and it'll change the "core" unmodulated value, without changing the modulations).
+
+You must first install and activate https://github.com/sixolet/matrix !!! It's now a dependency!
+
+Then you can install this mod and it'll work.
 
 ## LFOs
 

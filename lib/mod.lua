@@ -11,7 +11,7 @@ local DIVISION_OPTS = {
 
 local N_RHYTHMS = 4
 local N_LFOS = 4
-local N_MULTS = 4
+local N_MACROS = 4
 local N_SEQS = 4
 
 local toolkit = {}
@@ -19,6 +19,22 @@ local toolkit = {}
 
 local n = function(i, s)
     return "tk_" .. i .. "_" ..s
+end
+
+local make_macro = function(i)
+    params:add_group("macro "..i, 2)
+    params:add_binary(n(i, "macro_active"), "active", "toggle", 1)
+    params:add_control(n(i, "macro_value"), "value", controlspec.new(0, 1, "lin", 0, 0))
+    matrix:add_unipolar("macro_"..i, "macro "..i)
+    local function set()
+        local val
+        if params:get(n(i, "macro_active")) > 0 then
+            val = params:get(n(i, "macro_value"))
+        end
+        matrix:set("macro_"..i, val)
+    end
+    params:set_action(n(i, "macro_active"), set)
+    params:set_action(n(i, "macro_value"), set)
 end
 
 local make_seq = function(i)
@@ -98,6 +114,13 @@ local make_lfo = function(i)
         _menu.rebuild_params()
     end)
     params:add_binary(n(i, "lfo_bipolar"), "bipolar", "toggle", 0)
+    params:set_action(n(i, "lfo_bipolar"), function (bipolar)
+        if bipolar > 0 then
+            matrix:lookup_source("lfo_"..i).t = matrix.tBIPOLAR
+        else
+            matrix:lookup_source("lfo_"..i).t = matrix.tUNIPOLAR
+        end
+    end)
     params:add_option(n(i, "shape"), "shape", {"sine", "tri/ramp", "pulse", "random"}, 1)
     matrix:defer_bang(n(i, "shape"))
     params:set_action(n(i, "shape"), function (s)
@@ -150,7 +173,8 @@ local make_lfo = function(i)
             value = rand_value
         end
         last_phase = phase
-        matrix:set("lfo_"..i, (value - 0.5*params:get(n(i, "lfo_bipolar"))))
+        local bipolar = params:get(n(i, "lfo_bipolar"))
+        matrix:set("lfo_"..i, (bipolar + 1) * (value - 0.5*bipolar))
     end
     toolkit.lfos[i] = toolkit.lattice:new_pattern{
         enabled = true,
@@ -229,6 +253,9 @@ local pre_init = function()
         end
         for i=1,N_SEQS,1 do
             make_seq(i)
+        end
+        for i=1,N_MACROS,1 do
+            make_macro(i)
         end
         toolkit.lattice:start()
     end)

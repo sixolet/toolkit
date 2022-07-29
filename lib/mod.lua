@@ -3,8 +3,7 @@ local lattice = require("lattice")
 local er = require("er")
 local deque = require('container/deque')
 
-local menu = require('toolkit/lib/menu')
-local matrix = require('toolkit/lib/modmatrix')
+local matrix = require('matrix/lib/matrix')
 
 local DIVISIONS = {1/16, 1/12, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 3/4, 1, 5/4, 6/4, 7/4, 2, 4, 8, 32, 64, 128}
 local DIVISION_OPTS = {
@@ -15,11 +14,7 @@ local N_LFOS = 4
 local N_MULTS = 4
 local N_SEQS = 4
 
-local toolkit = {
-    post_init = {},
-}
-
-
+local toolkit = {}
 
 
 local n = function(i, s)
@@ -221,12 +216,11 @@ end
 
 local pre_init = function()
     print("pre-init")
-    local init1 = init
     toolkit.lattice = lattice:new()
     toolkit.rhythms = {}
     toolkit.lfos = {}
     toolkit.trigs = {}
-    toolkit.post_init["toolkit"] = function() 
+    matrix:add_post_init_hook(function() 
         for i=1,N_RHYTHMS,1 do
             make_rhythm(i)
         end
@@ -235,39 +229,19 @@ local pre_init = function()
         end
         for i=1,N_SEQS,1 do
             make_seq(i)
-        end        
-    end
-    init = function()
-        print("about to init")
-        init1()
-        print("post init")
-        for _, f in pairs(toolkit.post_init) do
-            f()
         end
-        
-        -- after adding our params, we want to re-load default/existing values
-        -- but, we don't want to re-bang script params, 
-        -- or bang our params which have conflicting side-effects
-        params:read(nil, true)
-        print("Starting")
         toolkit.lattice:start()
-    end
+    end)
 end
 
 
 local post_cleanup = function()
-    print("post cleanup")
     if toolkit.lattice ~= nil then
         toolkit.lattice:destroy()
         toolkit.lattice = nil
     end
-    toolkit.post_init = {}
-    
 end
-mod.hook.register("system_post_startup", "toolkit post startup", function() matrix:install() end)
 mod.hook.register("script_pre_init", "toolkit pre init", pre_init)
 mod.hook.register("script_post_cleanup", "toolkit post clean", post_cleanup)
-
-mod.menu.register("toolkit", menu)
 
 return toolkit

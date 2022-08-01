@@ -245,6 +245,7 @@ local pre_init = function()
     toolkit.lfos = {}
     toolkit.trigs = {}
     matrix:add_post_init_hook(function() 
+        params:add_separator("toolkit")
         for i=1,N_RHYTHMS,1 do
             make_rhythm(i)
         end

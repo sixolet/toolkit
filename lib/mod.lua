@@ -189,11 +189,14 @@ local make_rhythm = function(i)
     params:add_option(n(i, "div"), "division", DIVISION_OPTS, 7)
     params:set_action(n(i, "div"), function(d)
         toolkit.rhythms[i]:set_division(DIVISIONS[d])
-        -- This arcane machination is required to preserve appropriate swing and beats when changing divisions.
-        local tick_length = toolkit.rhythms[i].division * toolkit.lattice.ppqn
-        local two_phase = (toolkit.lattice.transport % (2*tick_length))/tick_length
-        toolkit.rhythms[i].phase = toolkit.lattice.transport % tick_length
-        toolkit.rhythms[i].downbeat = (two_phase < 1)
+        -- we are going to borrow the original clock to sync to the beat again.
+        clock.run(function(i) 
+            clock.sync(8*DIVISIONS[d])
+            if toolkit.rhythms[i].division == DIVISIONS[d] then
+                toolkit.rhythms[i].phase = 0
+                toolkit.rhythms[i].downbeat = true
+            end
+        end, i)
     end)
     matrix:defer_bang(n(i, "div"))
     params:add_control(n(i, "swing"), "swing", controlspec.new(50, 90, "lin", 0, 50))

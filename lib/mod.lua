@@ -244,6 +244,10 @@ end
 local pre_init = function()
     print("pre-init")
     toolkit.lattice = lattice:new()
+    -- hack to fix problem in new_pattern
+    if toolkit.lattice.new_sprocket ~= nil then
+        toolkit.lattice.new_pattern = toolkit.lattice.new_sprocket
+    end
     toolkit.rhythms = {}
     toolkit.lfos = {}
     toolkit.trigs = {}

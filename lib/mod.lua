@@ -190,7 +190,7 @@ local make_rhythm = function(i)
     params:set_action(n(i, "div"), function(d)
         toolkit.rhythms[i]:set_division(DIVISIONS[d])
         -- This arcane machination is required to preserve appropriate swing and beats when changing divisions.
-        local tick_length = toolkit.rhythms[i].division * toolkit.lattice.ppqn * toolkit.lattice.meter
+        local tick_length = toolkit.rhythms[i].division * toolkit.lattice.ppqn
         local two_phase = (toolkit.lattice.transport % (2*tick_length))/tick_length
         toolkit.rhythms[i].phase = toolkit.lattice.transport % tick_length
         toolkit.rhythms[i].downbeat = (two_phase < 1)
